@@ -3,25 +3,24 @@ package keynest
 import (
 	"bytes"
 	"encoding/binary"
+	"github.com/vmihailenco/msgpack/v5"
 )
 
 type Metadata struct {
-	KeySize uint32
+	KeySize uint16
 	ValSize uint32
-	Offset  uint32
 }
 
 type Record struct {
-	metadata Metadata
-	Key      string
-	Val      string
+	Key string
+	Val any
 }
 
-func (h *Record) Size() uint32 {
-	return uint32(binary.Size(h.Key)+binary.Size(h.Val)) + h.metadata.Size()
-}
-func (h *Metadata) Size() uint32 {
-	return uint32(binary.Size(h))
+type Index struct {
+	Key     string
+	KeySize uint16
+	ValSize uint32
+	Offset  int64
 }
 
 func (h *Metadata) Marshal(src *bytes.Buffer) error {
@@ -30,11 +29,6 @@ func (h *Metadata) Marshal(src *bytes.Buffer) error {
 		return err
 	}
 	err = binary.Write(src, binary.LittleEndian, &h.ValSize)
-	if err != nil {
-		return err
-	}
-
-	err = binary.Write(src, binary.LittleEndian, &h.Offset)
 	if err != nil {
 		return err
 	}
@@ -57,33 +51,33 @@ func (h *Metadata) UnMarshal(src []byte) error {
 	return nil
 }
 
-func (r *Record) Marshal(buf *bytes.Buffer) error {
-	err := r.metadata.Marshal(buf)
+func (r *Record) Marshal(buf *bytes.Buffer) (Metadata, error) {
+	metadata := Metadata{}
+	metadata.KeySize = uint16(len(r.Key))
+	b, err := msgpack.Marshal(r.Val)
 	if err != nil {
-		return err
+		return metadata, err
 	}
+	metadata.ValSize = uint32(len(b))
+	metadata.Marshal(buf)
+
 	_, err = buf.WriteString(r.Key)
 	if err != nil {
-		return err
-	}
-	_, err = buf.WriteString(r.Val)
-	if err != nil {
-		return err
+		return metadata, err
 	}
 
-	return nil
+	_, err = buf.Write(b)
+	if err != nil {
+		return metadata, err
+	}
+
+	return metadata, nil
 }
 
-func (r *Record) UnMarshal(src []byte) error {
-	err := r.metadata.UnMarshal(src)
-	if err != nil {
-		return err
-	}
-	start := r.metadata.Size()
-	end := start + r.metadata.KeySize
-	r.Key = string(src[start:end])
-	start, end = end, end+r.metadata.ValSize
-	r.Val = string(src[start:end])
+func (r *Record) UnMarshalKey(src []byte) {
+	r.Key = string(src)
+}
 
-	return nil
+func (r *Record) UnMarshalVal(src []byte) error {
+	return msgpack.Unmarshal(src, r.Val)
 }

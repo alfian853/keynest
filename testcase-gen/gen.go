@@ -13,9 +13,10 @@ import (
 func GenerateRandKeyPairs(size int) []keynest.Record {
 	records := make([]keynest.Record, size)
 	for i := 0; i < size; i++ {
+		k, v := generateRandomKeyValuePair()
 		records[i] = keynest.Record{
-			Key: randomString(rand.Intn(5) + 5),
-			Val: randomString(rand.Intn(5) + 5),
+			Key: k,
+			Val: v,
 		}
 	}
 	return records
