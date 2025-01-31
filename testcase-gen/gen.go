@@ -74,7 +74,7 @@ func generateRandomKeyValuePair() (string, interface{}) {
 	rand.Seed(time.Now().UnixNano())
 
 	// Generate random key
-	key := randomString(8) // Random string key
+	key := randomString(4) // Random string key
 
 	// Generate random value
 	valueType := rand.Intn(6) // Six possible types for value

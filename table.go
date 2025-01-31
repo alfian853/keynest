@@ -18,12 +18,13 @@ var (
 
 type FTable struct {
 	dataFile    *os.File
-	indexFile   *os.File
 	sizeInBytes int64
 	nRecords    int
 	sparseIndex []Index
 	bloomFilter *bloom.BloomFilter
 	cfg         *Config
+	minKey      string
+	maxKey      string
 }
 
 func NewFTableWithUnsortedRecord(lvl int, records []Record, cfg *Config) *FTable {
@@ -46,8 +47,11 @@ func NewFTableWithUnsortedRecord(lvl int, records []Record, cfg *Config) *FTable
 	offset := int64(0)
 	ftable.dataFile, _ = os.Create(fmt.Sprintf("%d-%d.kv", lvl, time.Now().UnixMilli()))
 	buf := new(bytes.Buffer)
+	ftable.minKey = records[0].Key
+	ftable.maxKey = records[len(records)-1].Key
 	for i := range records {
 		ftable.writeRecordToFile(&records[i], buf, i, &offset)
+
 	}
 
 	ftable.sizeInBytes = offset
@@ -79,6 +83,13 @@ func NewFTableWithSortedRecordCh(lvl int, recordCh chan *HeapRecord, nRecords in
 	for record := range recordCh {
 		ftable.writeRecordToFile(record.Record, buf, i, &offset)
 		ftable.bloomFilter.Add(record.Key)
+
+		if i == 0 {
+			ftable.minKey = record.Key
+			ftable.maxKey = record.Key
+		} else {
+			ftable.maxKey = record.Key
+		}
 		i++
 	}
 	ftable.nRecords = i
@@ -162,20 +173,26 @@ func (s *FTable) Get(key string) (val any, ok bool) {
 		curOffset += int64(metadata.KeySize)
 		r := Record{}
 		r.UnMarshalKey(keyBytes)
-
 		if r.Key == key {
 			// Read value
 			valBytes := make([]byte, metadata.ValSize)
 			if _, err := s.dataFile.ReadAt(valBytes, curOffset); err != nil {
 				return nil, false
 			}
-			curOffset += int64(metadata.ValSize)
-			r.UnMarshalVal(valBytes)
-			val = r.Val
+			err := r.UnMarshalVal(valBytes)
+			if err != nil {
+				return nil, true
+			}
 
-			return val, true
+			return r.Val, true
 		}
 		curOffset += int64(metadata.ValSize)
 	}
 	return nil, false
+}
+
+func (s *FTable) Destroy() {
+	s.dataFile.Close()
+	os.Remove(s.dataFile.Name())
+	clear(s.sparseIndex)
 }

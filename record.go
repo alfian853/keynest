@@ -79,5 +79,5 @@ func (r *Record) UnMarshalKey(src []byte) {
 }
 
 func (r *Record) UnMarshalVal(src []byte) error {
-	return msgpack.Unmarshal(src, r.Val)
+	return msgpack.Unmarshal(src, &r.Val)
 }

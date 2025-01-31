@@ -1,10 +1,8 @@
 package keynest
 
-import "os"
-
 type HeapRecord struct {
 	*Record
-	file       *os.File
+	*FTable
 	nextOffset int64
 }
 
