@@ -10,11 +10,11 @@ import (
 	"time"
 )
 
-func GenerateRandKeyPairs(size int) []keynest.Record {
-	records := make([]keynest.Record, size)
+func GenerateRandKeyPairs(size int) []*keynest.Record {
+	records := make([]*keynest.Record, size)
 	for i := 0; i < size; i++ {
 		k, v := generateRandomKeyValuePair()
-		records[i] = keynest.Record{
+		records[i] = &keynest.Record{
 			Key: k,
 			Val: v,
 		}

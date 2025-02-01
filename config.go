@@ -8,4 +8,6 @@ type Config struct {
 	FalsePositiveRate  float64
 	Lvl0MaxTableNum    int
 	CompactionInterval time.Duration
+	MemFlushInterval   time.Duration
+	MemMaxNum          int
 }

@@ -1,7 +1,6 @@
 package keynest
 
 import (
-	"bytes"
 	"container/heap"
 	"fmt"
 	"sort"
@@ -12,49 +11,69 @@ import (
 type TableCluster struct {
 	//first dimension is level, second is horizontal partition. L0 is the first level that might contains overlap between partition
 	//the L1 and above don't contain overlap between partition
-	tables    [][]*FTable
-	levelLock []sync.RWMutex
-	cfg       *Config
+	memtable     *MemTable
+	ftables      [][]*FTable
+	ftablesLock  []sync.RWMutex
+	memTableLock sync.Mutex
+	cfg          *Config
 }
 
 func NewTableCluster(cfg *Config) *TableCluster {
 	tc := &TableCluster{
-		cfg:    cfg,
-		tables: make([][]*FTable, 1),
+		cfg:      cfg,
+		ftables:  make([][]*FTable, 1),
+		memtable: NewMemTable(),
 	}
-	tc.tables[0] = make([]*FTable, 0)
-	tc.levelLock = []sync.RWMutex{{}}
-	tc.runCompactionJob()
+	tc.ftables[0] = make([]*FTable, 0)
+	tc.ftablesLock = []sync.RWMutex{{}}
+	tc.runFTableCompactionJob()
 	return tc
 }
 
-func (t *TableCluster) AddRecords(records []Record) {
-	t.levelLock[0].Lock()
-	t.tables[0] = append(t.tables[0], NewFTableWithUnsortedRecord(0, records, t.cfg))
-	t.levelLock[0].Unlock()
+func (t *TableCluster) AddRecords(records []*Record) {
+	t.ftablesLock[0].Lock()
+	t.ftables[0] = append(t.ftables[0], NewFTableWithUnsortedRecord(0, records, t.cfg))
+	t.ftablesLock[0].Unlock()
+}
+
+func (t *TableCluster) Put(key string, val any) {
+	t.memTableLock.Lock()
+	t.memtable.Put(key, val)
+	t.memTableLock.Unlock()
+}
+
+func (t *TableCluster) Delete(key string) {
+	t.memTableLock.Lock()
+	t.memtable.Delete(key)
+	t.memTableLock.Unlock()
 }
 
 func (t *TableCluster) Get(key string) (any, bool) {
-	t.levelLock[0].RLock()
+	val, ok := t.memtable.Get(key)
+	if ok {
+		return val, true
+	}
+
+	t.ftablesLock[0].RLock()
 	lvl0Unlock := false
 	defer func() {
 		if !lvl0Unlock {
-			t.levelLock[0].RUnlock()
+			t.ftablesLock[0].RUnlock()
 		}
 	}()
-	for i, _ := range t.tables[0] {
-		val, ok := t.tables[0][i].Get(key)
+	for i, _ := range t.ftables[0] {
+		val, ok := t.ftables[0][i].Get(key)
 		if ok {
 			return val, true
 		}
 	}
-	t.levelLock[0].RUnlock()
+	t.ftablesLock[0].RUnlock()
 	lvl0Unlock = true
 
-	for i, _ := range t.tables[1:] {
+	for i, _ := range t.ftables[1:] {
 		i = i + 1 //skip index 0
-		t.levelLock[i].RLock()
-		defer t.levelLock[i].RUnlock()
+		t.ftablesLock[i].RLock()
+		defer t.ftablesLock[i].RUnlock()
 		minI, maxI, isOverlap := t.findOverlapTablesRange(i, key, key)
 
 		if !isOverlap {
@@ -62,7 +81,7 @@ func (t *TableCluster) Get(key string) (any, bool) {
 		}
 
 		for j := minI; j < maxI; j++ {
-			val, ok := t.tables[i][j].Get(key)
+			val, ok := t.ftables[i][j].Get(key)
 			if ok {
 				return val, true
 			}
@@ -72,167 +91,270 @@ func (t *TableCluster) Get(key string) (any, bool) {
 	return nil, false
 }
 
-func (t *TableCluster) runCompactionJob() {
-
+func (t *TableCluster) runFTableCompactionJob() {
 	go func() {
-		for range time.Tick(t.cfg.CompactionInterval) {
-			t.compactingLvl0()
-		}
+		//for range time.Tick(t.cfg.CompactionInterval) {
+		//	t.compactingLvl0()
+		//}
 	}()
+}
 
+func (t *TableCluster) runMemTableFlushJob() {
+	go func() {
+		//for range time.Tick(t.cfg.MemFlushInterval) {
+		//	t.flushMemTableToFTable()
+		//}
+	}()
+}
+
+func (t *TableCluster) flushMemTableToFTable() {
+	t.memTableLock.Lock()
+	defer t.memTableLock.Unlock()
+
+	values := t.memtable.tree.Values()
+	keys := t.memtable.tree.Keys()
+	t.memtable.tree.Clear()
+
+	sortedRecords := make([]*Record, len(values))
+	for i, v := range values {
+		memRecord := v.(*MemRecord)
+		sortedRecords[i] = &Record{
+			Key: keys[i].(string),
+			Val: memRecord.val,
+			Metadata: Metadata{
+				TombStone: memRecord.tombstone,
+			},
+		}
+	}
+
+	t.AddRecords(sortedRecords)
 }
 
 func (t *TableCluster) compactingLvl0() {
-	if len(t.tables[0]) <= t.cfg.Lvl0MaxTableNum {
+	if len(t.ftables[0]) <= t.cfg.Lvl0MaxTableNum {
 		return
 	}
 
 	//since the lvl 0 might be appended during compaction,
 	//so we need to lock the last index of which the compaction will start from index 0 till the last index
-	lastIndex := len(t.tables[0])
+	lastIndex := len(t.ftables[0])
 
-	fmt.Printf("[INFO] Start compaction job for %d tables at %d\n", lastIndex, time.Now().UnixMilli())
+	fmt.Printf("[INFO] Start compaction job for %d ftables at %d\n", lastIndex, time.Now().UnixMilli())
 
 	minHeap := &MinHeapRecord{}
 	heap.Init(minHeap)
 	totalRecords := 0
-	lvl0MinKey := t.tables[0][0].minKey
-	lvl0MaxKey := t.tables[0][0].maxKey
 
 	for i := range lastIndex {
-		totalRecords += t.tables[0][i].nRecords
-		b := make([]byte, SizeOfMetadata)
-		t.tables[0][i].dataFile.ReadAt(b, 0)
-		m := Metadata{}
-		m.UnMarshal(b)
-		b = make([]byte, int(m.KeySize)+int(m.ValSize))
-		t.tables[0][i].dataFile.ReadAt(b, SizeOfMetadata)
-		r := Record{}
-		r.UnMarshalKey(b[:m.KeySize])
-		r.UnMarshalVal(b[m.KeySize:])
-
-		heap.Push(minHeap, &HeapRecord{
-			Record:     &r,
-			FTable:     t.tables[0][i],
-			nextOffset: SizeOfMetadata + int64(m.KeySize) + int64(m.ValSize),
-		})
-
-		if t.tables[0][i].minKey < lvl0MinKey {
-			lvl0MinKey = t.tables[0][i].minKey
-		} else if t.tables[0][i].maxKey > lvl0MaxKey {
-			lvl0MaxKey = t.tables[0][i].maxKey
-		}
+		totalRecords += t.ftables[0][i].nRecords
 	}
+	lvl0records := make([]*Record, 0, totalRecords)
 
-	minI, maxI, isOverlap := t.findOverlapTablesRange(1, lvl0MinKey, lvl0MaxKey)
-	if isOverlap {
-		for i, table := range t.tables[1][minI:maxI] {
-			totalRecords += table.nRecords
-			b := make([]byte, SizeOfMetadata)
-			table.dataFile.ReadAt(b, 0)
-			m := Metadata{}
-			m.UnMarshal(b)
-			b = make([]byte, int(m.KeySize)+int(m.ValSize))
-			r := Record{}
-			r.UnMarshalKey(b[:m.KeySize])
-			r.UnMarshalVal(b[m.KeySize:])
-			heap.Push(minHeap, &HeapRecord{
-				Record:     &r,
-				FTable:     t.tables[1][i],
-				nextOffset: SizeOfMetadata + int64(m.KeySize) + int64(m.ValSize),
-			})
-		}
-	}
-
-	minRecordCh := make(chan *HeapRecord)
-	go func() {
-		defer close(minRecordCh)
-		for minHeap.Len() > 0 {
-			minRecord := heap.Pop(minHeap).(*HeapRecord)
-			minRecordCh <- minRecord
-			if minRecord.FTable.sizeInBytes <= minRecord.nextOffset {
+	// merge all records from level 0 to lvl0records in sorted order
+	offsets := make([]int64, lastIndex)
+	curRecords := make([]*Record, lastIndex)
+	for {
+		var minRecord *Record
+		for i := max(lastIndex-1, 0); i >= 0; i-- {
+			if offsets[i] >= t.ftables[0][i].sizeInBytes {
 				continue
 			}
-			buf := new(bytes.Buffer)
-
-			_, err := minRecord.Marshal(buf)
-			if err != nil {
-				fmt.Println("Error happen when minRecord.Marshal")
+			if curRecords[i] != nil {
+				continue
 			}
+			tmpRecord := Record{}
 			b := make([]byte, SizeOfMetadata)
-			curOffset := minRecord.nextOffset
-			minRecord.FTable.dataFile.ReadAt(b, curOffset)
-			metadata := Metadata{}
-			metadata.UnMarshal(b)
-			curOffset += SizeOfMetadata
-			b = make([]byte, int(metadata.KeySize)+int(metadata.ValSize))
-			minRecord.FTable.dataFile.ReadAt(b, curOffset)
-			r := Record{}
-			r.UnMarshalKey(b[:metadata.KeySize])
-			r.UnMarshalVal(b[metadata.KeySize:])
-			curOffset += int64(metadata.KeySize) + int64(metadata.ValSize)
-			heap.Push(minHeap, &HeapRecord{
-				Record:     &r,
-				FTable:     minRecord.FTable,
-				nextOffset: curOffset,
-			})
+			t.ftables[0][i].dataFile.ReadAt(b, offsets[i])
+			offsets[i] += SizeOfMetadata
+			tmpRecord.Metadata.UnMarshal(b)
+			b = make([]byte, tmpRecord.ContentSize())
+			t.ftables[0][i].dataFile.ReadAt(b, offsets[i])
+			offsets[i] += int64(tmpRecord.ContentSize())
+			tmpRecord.UnMarshalKey(b[:tmpRecord.Metadata.KeySize])
+			tmpRecord.UnMarshalVal(b[tmpRecord.Metadata.KeySize:])
+			curRecords[i] = &tmpRecord
 		}
-	}()
 
-	fmt.Println("[INFO] New table created")
-	ftable := NewFTableWithSortedRecordCh(1, minRecordCh, totalRecords, t.cfg)
-	t.levelLock[0].Lock()
-	if len(t.levelLock) == 1 {
-		t.levelLock = append(t.levelLock, sync.RWMutex{})
-		t.tables = append(t.tables, []*FTable{})
+		for i := max(lastIndex-1, 0); i >= 0; i-- {
+			if curRecords[i] == nil {
+				continue
+			}
+			if minRecord == nil {
+				minRecord = curRecords[i]
+				curRecords[i] = nil
+				continue
+			}
+
+			if minRecord.Key > curRecords[i].Key {
+				minRecord = curRecords[i]
+			} else if minRecord.Key == curRecords[i].Key { //if duplicate found
+				curRecords[i] = nil //remove duplicate
+			}
+		}
+		if minRecord == nil {
+			break
+		}
+		lvl0records = append(lvl0records, minRecord)
 	}
 
-	t.levelLock[1].Lock()
+	var ftable *FTable
+	minI, maxI, isOverlap := t.findOverlapTablesRange(1, lvl0records[0].Key, lvl0records[len(lvl0records)-1].Key)
+	if isOverlap {
+		for _, table := range t.ftables[1][minI:maxI] {
+			totalRecords += table.nRecords
+		}
+		minRecordCh := make(chan *Record)
+
+		go func() {
+			defer close(minRecordCh)
+			offset := int64(0)
+			lvl1Idx := minI
+			lvl0Idx := 0
+			var lvl1Record *Record
+
+			//merge the sorted records from lvl0 and lvl1
+			for lvl1Idx < maxI && lvl0Idx < len(lvl0records) {
+				if lvl1Record == nil {
+					if offset <= t.ftables[1][lvl1Idx].sizeInBytes {
+						lvl1Record = &Record{}
+						b := make([]byte, SizeOfMetadata)
+						t.ftables[1][lvl1Idx].dataFile.ReadAt(b, offset)
+						offset += SizeOfMetadata
+						lvl1Record.Metadata.UnMarshal(b)
+
+						b = make([]byte, lvl1Record.ContentSize())
+						t.ftables[1][lvl1Idx].dataFile.ReadAt(b, offset)
+						offset += int64(lvl1Record.ContentSize())
+						lvl1Record.UnMarshalKey(b[:lvl1Record.Metadata.KeySize])
+						lvl1Record.UnMarshalVal(b[lvl1Record.Metadata.KeySize:])
+					} else if lvl1Idx+1 < maxI {
+						lvl1Idx++
+						offset = 0
+						continue
+					} else {
+						break
+					}
+				}
+
+				if lvl0records[lvl0Idx].Key < lvl1Record.Key {
+					minRecordCh <- lvl0records[lvl0Idx]
+					lvl0Idx++
+				} else if lvl0records[lvl0Idx].Key > lvl1Record.Key {
+					minRecordCh <- lvl1Record
+					lvl1Record = nil
+				} else { //if same, skip lvl1 data as the lvl 0 is the latest one.
+					minRecordCh <- lvl1Record
+					lvl1Record = nil
+					//TODO: provide option strategy to deal with deletion: should we put a tombstone or discard it?
+					if !lvl0records[lvl0Idx].TombStone {
+						minRecordCh <- lvl0records[lvl0Idx]
+					}
+					lvl0Idx++
+				}
+			}
+
+			//accumulate the rest of the records
+			for lvl1Idx < maxI {
+				if offset <= t.ftables[1][lvl1Idx].sizeInBytes {
+					lvl1Record = &Record{}
+					b := make([]byte, SizeOfMetadata)
+					t.ftables[1][lvl1Idx].dataFile.ReadAt(b, offset)
+					offset += SizeOfMetadata
+					lvl1Record.Metadata.UnMarshal(b)
+
+					b = make([]byte, lvl1Record.ContentSize())
+					t.ftables[1][lvl1Idx].dataFile.ReadAt(b, offset)
+					offset += int64(lvl1Record.ContentSize())
+					lvl1Record.UnMarshalKey(b[:lvl1Record.Metadata.KeySize])
+					lvl1Record.UnMarshalVal(b[lvl1Record.Metadata.KeySize:])
+					minRecordCh <- lvl1Record
+				} else if lvl1Idx+1 < maxI {
+					lvl1Idx++
+					offset = 0
+					continue
+				} else {
+					break
+				}
+			}
+			for lvl0Idx < len(lvl0records) {
+				minRecordCh <- lvl0records[lvl0Idx]
+				lvl0Idx++
+			}
+		}()
+
+		ftable = NewFTableWithSortedRecordCh(1, minRecordCh, totalRecords, t.cfg)
+
+	} else {
+		ftable = NewFTableWithUnsortedRecord(1, lvl0records, t.cfg)
+	}
+
+	fmt.Println("[INFO] New table created")
+	t.ftablesLock[0].Lock()
+	if len(t.ftablesLock) == 1 {
+		t.ftablesLock = append(t.ftablesLock, sync.RWMutex{})
+		t.ftables = append(t.ftables, []*FTable{})
+	}
+
+	t.ftablesLock[1].Lock()
 
 	if isOverlap {
 		for i := minI; i < maxI; i++ {
 			fmt.Printf("[INFO] Destroy table[%d][%d]\n", 1, i)
-			t.tables[1][i].Destroy()
+			t.ftables[1][i].Destroy()
 		}
-		t.tables[1] = append(t.tables[1][:minI], append([]*FTable{ftable}, t.tables[1][maxI:]...)...)
+		t.ftables[1] = append(t.ftables[1][:minI], append([]*FTable{ftable}, t.ftables[1][maxI:]...)...)
 	} else {
-		t.tables[1] = append(t.tables[1], ftable)
+		t.ftables[1] = append(t.ftables[1], ftable)
 	}
 	fmt.Println("[INFO] New table added at lvl 1")
 
 	for i := 0; i < lastIndex; i++ {
 		fmt.Printf("[INFO] Destroy table[%d][%d]\n", 0, i)
-		t.tables[0][i].Destroy()
+		t.ftables[0][i].Destroy()
 	}
-	t.tables[0] = t.tables[0][lastIndex:]
-	t.levelLock[1].Unlock()
-	t.levelLock[0].Unlock()
-	fmt.Printf("[INFO] Compaction job done at %d for %d tables\n", time.Now().UnixMilli(), lastIndex)
+	t.ftables[0] = t.ftables[0][lastIndex:]
+	t.ftablesLock[1].Unlock()
+	t.ftablesLock[0].Unlock()
+	fmt.Printf("[INFO] Compaction job done at %d for %d ftables\n", time.Now().UnixMilli(), lastIndex)
 }
 
+// find overlap tables given a min-max keys. the interpretation of minI-maxI is similar to golang slice [minI-maxI] which means all elements
+// from index minI till maxI-1 are included
 func (t *TableCluster) findOverlapTablesRange(lvl int, minKey, maxKey string) (minI, maxI int, isOverlap bool) {
 
-	if lvl <= 0 || lvl >= len(t.tables) || len(t.tables[lvl]) == 0 {
+	if lvl <= 0 || lvl >= len(t.ftables) || len(t.ftables[lvl]) == 0 {
 		return -1, -1, false
 	}
 
-	minI = sort.Search(len(t.tables[lvl]), func(i int) bool {
-		return minKey < t.tables[lvl][i].minKey
+	minI = sort.Search(len(t.ftables[lvl]), func(i int) bool {
+		return minKey < t.ftables[lvl][i].minKey
 	})
 
-	maxI = sort.Search(len(t.tables[lvl]), func(i int) bool {
-		return maxKey < t.tables[lvl][i].maxKey
+	maxI = sort.Search(len(t.ftables[lvl]), func(i int) bool {
+		return maxKey < t.ftables[lvl][i].maxKey
 	})
 
 	minI = max(minI-1, 0)
-	maxI = min(maxI, len(t.tables[lvl])-1)
-	if t.tables[lvl][minI].maxKey < minKey {
-		minI++
+	maxI = min(maxI, len(t.ftables[lvl])-1)
+	if t.ftables[lvl][minI].maxKey < minKey {
+		minI = min(minI+1, len(t.ftables[lvl])-1)
 	}
 
-	if t.tables[lvl][maxI].minKey < maxKey {
+	if t.ftables[lvl][maxI].minKey < maxKey {
+		maxI = min(maxI+1, len(t.ftables[lvl])-1)
+	}
+
+	isOverlap = t.ftables[lvl][minI].minKey <= minKey && maxKey <= t.ftables[lvl][maxI].maxKey
+	if isOverlap && minI == maxI {
 		maxI++
 	}
+	return minI, maxI, isOverlap
+}
 
-	return minI, maxI, minI != maxI
+func (t *TableCluster) TriggerCompaction() {
+	t.compactingLvl0()
+}
+
+func (t *TableCluster) TriggerMemFlush() {
+	t.flushMemTableToFTable()
 }
