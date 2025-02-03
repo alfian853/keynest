@@ -7,28 +7,39 @@ import (
 )
 
 type Metadata struct {
-	KeySize uint16
-	ValSize uint32
+	TombStone bool
+	KeySize   uint16
+	ValSize   uint32
 }
 
 type Record struct {
+	Metadata
 	Key string
 	Val any
 }
 
 type Index struct {
-	Key     string
-	KeySize uint16
-	ValSize uint32
-	Offset  int64
+	Tombstone bool
+	Key       string
+	KeySize   uint16
+	ValSize   uint32
+	Offset    int64
 }
 
-func (h *Metadata) Marshal(src *bytes.Buffer) error {
-	err := binary.Write(src, binary.LittleEndian, &h.KeySize)
+func (r *Record) ContentSize() int {
+	return int(r.KeySize) + int(r.ValSize)
+}
+
+func (m *Metadata) Marshal(src *bytes.Buffer) error {
+	err := binary.Write(src, binary.LittleEndian, &m.TombStone)
 	if err != nil {
 		return err
 	}
-	err = binary.Write(src, binary.LittleEndian, &h.ValSize)
+	err = binary.Write(src, binary.LittleEndian, &m.KeySize)
+	if err != nil {
+		return err
+	}
+	err = binary.Write(src, binary.LittleEndian, &m.ValSize)
 	if err != nil {
 		return err
 	}
@@ -36,15 +47,21 @@ func (h *Metadata) Marshal(src *bytes.Buffer) error {
 	return nil
 }
 
-func (h *Metadata) UnMarshal(src []byte) error {
+func (m *Metadata) UnMarshal(src []byte) error {
 	start := 0
-	end := binary.Size(h.KeySize)
-	_, err := binary.Decode(src[start:end], binary.LittleEndian, &h.KeySize)
+	end := 1
+	_, err := binary.Decode(src[start:end], binary.LittleEndian, &m.TombStone)
 	if err != nil {
 		return err
 	}
-	start, end = end, end+binary.Size(h.ValSize)
-	_, err = binary.Decode(src[start:end], binary.LittleEndian, &h.ValSize)
+	start = 1
+	end = 1 + binary.Size(m.KeySize)
+	_, err = binary.Decode(src[start:end], binary.LittleEndian, &m.KeySize)
+	if err != nil {
+		return err
+	}
+	start, end = end, end+binary.Size(m.ValSize)
+	_, err = binary.Decode(src[start:end], binary.LittleEndian, &m.ValSize)
 	if err != nil {
 		return err
 	}
@@ -52,26 +69,25 @@ func (h *Metadata) UnMarshal(src []byte) error {
 }
 
 func (r *Record) Marshal(buf *bytes.Buffer) (Metadata, error) {
-	metadata := Metadata{}
-	metadata.KeySize = uint16(len(r.Key))
+	r.Metadata.KeySize = uint16(len(r.Key))
 	b, err := msgpack.Marshal(r.Val)
 	if err != nil {
-		return metadata, err
+		return r.Metadata, err
 	}
-	metadata.ValSize = uint32(len(b))
-	metadata.Marshal(buf)
+	r.Metadata.ValSize = uint32(len(b))
+	r.Metadata.Marshal(buf)
 
 	_, err = buf.WriteString(r.Key)
 	if err != nil {
-		return metadata, err
+		return r.Metadata, err
 	}
 
 	_, err = buf.Write(b)
 	if err != nil {
-		return metadata, err
+		return r.Metadata, err
 	}
 
-	return metadata, nil
+	return r.Metadata, nil
 }
 
 func (r *Record) UnMarshalKey(src []byte) {

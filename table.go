@@ -27,13 +27,13 @@ type FTable struct {
 	maxKey      string
 }
 
-func NewFTableWithUnsortedRecord(lvl int, records []Record, cfg *Config) *FTable {
+func NewFTableWithUnsortedRecord(lvl int, records []*Record, cfg *Config) *FTable {
 	ftable := &FTable{
 		cfg:      cfg,
 		nRecords: len(records),
 	}
 
-	slices.SortFunc(records, func(a, b Record) int {
+	slices.SortFunc(records, func(a, b *Record) int {
 		if a.Key < b.Key {
 			return -1
 		}
@@ -50,7 +50,7 @@ func NewFTableWithUnsortedRecord(lvl int, records []Record, cfg *Config) *FTable
 	ftable.minKey = records[0].Key
 	ftable.maxKey = records[len(records)-1].Key
 	for i := range records {
-		ftable.writeRecordToFile(&records[i], buf, i, &offset)
+		ftable.writeRecordToFile(records[i], buf, i, &offset)
 
 	}
 
@@ -68,7 +68,7 @@ func NewFTableWithUnsortedRecord(lvl int, records []Record, cfg *Config) *FTable
 	return ftable
 }
 
-func NewFTableWithSortedRecordCh(lvl int, recordCh chan *HeapRecord, nRecords int, cfg *Config) *FTable {
+func NewFTableWithSortedRecordCh(lvl int, recordCh chan *Record, nRecords int, cfg *Config) *FTable {
 	ftable := &FTable{
 		cfg:      cfg,
 		nRecords: nRecords,
@@ -81,7 +81,7 @@ func NewFTableWithSortedRecordCh(lvl int, recordCh chan *HeapRecord, nRecords in
 	i := 0
 	ftable.bloomFilter = bloom.NewBloomFilter(uint(nRecords), cfg.FalsePositiveRate)
 	for record := range recordCh {
-		ftable.writeRecordToFile(record.Record, buf, i, &offset)
+		ftable.writeRecordToFile(record, buf, i, &offset)
 		ftable.bloomFilter.Add(record.Key)
 
 		if i == 0 {
@@ -110,10 +110,12 @@ func (s *FTable) writeRecordToFile(record *Record, buf *bytes.Buffer, i int, off
 
 	if (i+1)%s.cfg.IndexSkipNum == 0 {
 		s.sparseIndex = append(s.sparseIndex, Index{
-			Key:     record.Key,
-			KeySize: metadata.KeySize,
-			ValSize: metadata.ValSize,
-			Offset:  *offset,
+			Tombstone: metadata.TombStone,
+			Key:       record.Key,
+			KeySize:   metadata.KeySize,
+			ValSize:   metadata.ValSize,
+
+			Offset: *offset,
 		})
 	}
 	*offset += SizeOfMetadata + int64(metadata.KeySize) + int64(metadata.ValSize)
@@ -141,6 +143,9 @@ func (s *FTable) Get(key string) (val any, ok bool) {
 	var startOffset int64
 	var maxOffset int64
 	if idx < len(s.sparseIndex) && s.sparseIndex[idx].Key == key {
+		if s.sparseIndex[idx].Tombstone {
+			return nil, false
+		}
 		startOffset = s.sparseIndex[idx].Offset
 		idx++
 	} else if idx > 0 {
@@ -174,6 +179,9 @@ func (s *FTable) Get(key string) (val any, ok bool) {
 		r := Record{}
 		r.UnMarshalKey(keyBytes)
 		if r.Key == key {
+			if metadata.TombStone {
+				return nil, false
+			}
 			// Read value
 			valBytes := make([]byte, metadata.ValSize)
 			if _, err := s.dataFile.ReadAt(valBytes, curOffset); err != nil {
