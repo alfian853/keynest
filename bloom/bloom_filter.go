@@ -7,9 +7,9 @@ import (
 
 // BloomFilter structure
 type BloomFilter struct {
-	bitArray  []bool
-	size      uint
-	hashFuncs uint
+	BitArray  []bool
+	Size      uint
+	HashFuncs uint
 }
 
 // NewBloomFilter creates a new Bloom Filter
@@ -17,13 +17,13 @@ func NewBloomFilter(expectedElements uint, falsePositiveRate float64) *BloomFilt
 	m := optimalSize(expectedElements, falsePositiveRate)
 	k := optimalHashFunctions(expectedElements, m)
 	return &BloomFilter{
-		bitArray:  make([]bool, m),
-		size:      m,
-		hashFuncs: k,
+		BitArray:  make([]bool, m),
+		Size:      m,
+		HashFuncs: k,
 	}
 }
 
-// optimalSize calculates the required bit array size (m)
+// optimalSize calculates the required bit array Size (m)
 func optimalSize(n uint, p float64) uint {
 	return uint(math.Ceil(float64(n) * math.Log(p) / math.Log(1/math.Pow(2, math.Log(2)))))
 }
@@ -37,15 +37,15 @@ func optimalHashFunctions(n, m uint) uint {
 func (bf *BloomFilter) murmurHash(data []byte, seed uint32) uint {
 	hash := murmur3.New64WithSeed(seed)
 	hash.Write(data)
-	return uint(hash.Sum64() % uint64(bf.size))
+	return uint(hash.Sum64() % uint64(bf.Size))
 }
 
 // Add inserts an item into the Bloom Filter
 func (bf *BloomFilter) Add(item string) {
 	data := []byte(item)
-	for i := uint32(0); i < uint32(bf.hashFuncs); i++ {
+	for i := uint32(0); i < uint32(bf.HashFuncs); i++ {
 		index := bf.murmurHash(data, i)
-		bf.bitArray[index] = true
+		bf.BitArray[index] = true
 	}
 }
 
@@ -53,9 +53,9 @@ func (bf *BloomFilter) Add(item string) {
 // if it returns false, the item is definitely not in the set
 func (bf *BloomFilter) MightContains(item string) bool {
 	data := []byte(item)
-	for i := uint32(0); i < uint32(bf.hashFuncs); i++ {
+	for i := uint32(0); i < uint32(bf.HashFuncs); i++ {
 		index := bf.murmurHash(data, i)
-		if !bf.bitArray[index] {
+		if !bf.BitArray[index] {
 			return false // Definitely not in the set
 		}
 	}
