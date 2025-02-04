@@ -31,6 +31,9 @@ func NewTableCluster(cfg *Config) *TableCluster {
 }
 
 func (t *TableCluster) AddRecords(records []*Record) {
+	if len(records) == 0 {
+		return
+	}
 	t.ftablesLock[0].Lock()
 	t.ftables[0] = append(t.ftables[0], NewFTableWithUnsortedRecord(0, records, t.cfg))
 	t.ftablesLock[0].Unlock()
@@ -91,10 +94,18 @@ func (t *TableCluster) Get(key string) (any, bool) {
 	return nil, false
 }
 
+func (t *TableCluster) TriggerCompaction() {
+	t.compactingLvl0()
+}
+
+func (t *TableCluster) TriggerMemFlush() {
+	t.flushMemTableToFTable()
+}
+
 func (t *TableCluster) runFTableCompactionJob() {
 	go func() {
 		for range time.Tick(t.cfg.CompactionInterval) {
-			//t.compactingLvl0()
+			t.compactingLvl0()
 		}
 	}()
 }
@@ -102,7 +113,7 @@ func (t *TableCluster) runFTableCompactionJob() {
 func (t *TableCluster) runMemTableFlushJob() {
 	go func() {
 		for range time.Tick(t.cfg.MemFlushInterval) {
-			//t.flushMemTableToFTable()
+			t.flushMemTableToFTable()
 		}
 	}()
 }
@@ -112,6 +123,9 @@ func (t *TableCluster) flushMemTableToFTable() {
 	defer t.memTableLock.Unlock()
 
 	values := t.memtable.tree.Values()
+	if len(values) == 0 {
+		return
+	}
 	keys := t.memtable.tree.Keys()
 	t.memtable.tree.Clear()
 
@@ -158,6 +172,7 @@ func (t *TableCluster) compactingLvl0() {
 	if len(t.ftables[0]) <= t.cfg.Lvl0MaxTableNum {
 		return
 	}
+	defer t.SnapshotTableClusterMetadata()
 
 	//since the lvl 0 might be appended during compaction,
 	//so we need to lock the last index of which the compaction will start from index 0 till the last index
@@ -357,12 +372,4 @@ func (t *TableCluster) findOverlapTablesRange(lvl int, minKey, maxKey string) (m
 		maxI++
 	}
 	return minI, maxI, isOverlap
-}
-
-func (t *TableCluster) TriggerCompaction() {
-	t.compactingLvl0()
-}
-
-func (t *TableCluster) TriggerMemFlush() {
-	t.flushMemTableToFTable()
 }

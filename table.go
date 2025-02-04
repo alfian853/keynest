@@ -204,3 +204,15 @@ func (s *FTable) Destroy() {
 	os.Remove(s.dataFile.Name())
 	clear(s.sparseIndex)
 }
+
+func (s *FTable) GetSnapshotTableMetadata() TableMetadata {
+	return TableMetadata{
+		FileName:    s.dataFile.Name(),
+		NRecords:    s.nRecords,
+		SizeInBytes: s.sizeInBytes,
+		MinKey:      s.minKey,
+		MaxKey:      s.maxKey,
+		BloomFilter: *s.bloomFilter,
+		SparseIndex: s.sparseIndex,
+	}
+}

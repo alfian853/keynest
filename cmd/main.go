@@ -20,10 +20,10 @@ type Response struct {
 
 func main() {
 	cluster := keynest.NewTableCluster(&keynest.Config{
-		IndexSkipNum:       50,
+		IndexSkipNum:       2,
 		WriteBufferSize:    1024 * 4,
 		FalsePositiveRate:  0.01,
-		Lvl0MaxTableNum:    0,
+		Lvl0MaxTableNum:    4,
 		CompactionInterval: time.Second * 4,
 	})
 
@@ -171,6 +171,47 @@ func main() {
 		}()
 
 		cluster.TriggerMemFlush()
+	}))
+
+	http.Handle("/trigger-snapshot", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		resp := &Response{
+			StatusCode: http.StatusOK,
+		}
+		defer func() {
+			if r := recover(); r != nil {
+				resp := &Response{
+					StatusCode: http.StatusInternalServerError,
+					Message:    "internal server error",
+				}
+				w.Header().Set("Content-Type", "application/json")
+				json.NewEncoder(w).Encode(resp)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(resp)
+		}()
+
+		cluster.SnapshotTableClusterMetadata()
+	}))
+
+	http.Handle("/trigger-load-metadata", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+
+		resp := &Response{
+			StatusCode: http.StatusOK,
+		}
+		defer func() {
+			if r := recover(); r != nil {
+				resp := &Response{
+					StatusCode: http.StatusInternalServerError,
+					Message:    "internal server error",
+				}
+				w.Header().Set("Content-Type", "application/json")
+				json.NewEncoder(w).Encode(resp)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(resp)
+		}()
+
+		cluster.LoadTableClusterMetadata()
 	}))
 
 	http.ListenAndServe(":8080", nil)
