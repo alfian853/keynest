@@ -1,8 +1,8 @@
 package keynest
 
 import (
-	"container/heap"
 	"fmt"
+	"os"
 	"sort"
 	"sync"
 	"time"
@@ -93,17 +93,17 @@ func (t *TableCluster) Get(key string) (any, bool) {
 
 func (t *TableCluster) runFTableCompactionJob() {
 	go func() {
-		//for range time.Tick(t.cfg.CompactionInterval) {
-		//	t.compactingLvl0()
-		//}
+		for range time.Tick(t.cfg.CompactionInterval) {
+			//t.compactingLvl0()
+		}
 	}()
 }
 
 func (t *TableCluster) runMemTableFlushJob() {
 	go func() {
-		//for range time.Tick(t.cfg.MemFlushInterval) {
-		//	t.flushMemTableToFTable()
-		//}
+		for range time.Tick(t.cfg.MemFlushInterval) {
+			//t.flushMemTableToFTable()
+		}
 	}()
 }
 
@@ -130,6 +130,30 @@ func (t *TableCluster) flushMemTableToFTable() {
 	t.AddRecords(sortedRecords)
 }
 
+func readRecordFromFTable(file *os.File, offset *int64) (*Record, error) {
+	record := Record{}
+	b := make([]byte, SizeOfMetadata)
+	n, err := file.ReadAt(b, *offset)
+	if err != nil {
+		return nil, err
+	}
+	*offset += int64(n)
+	err = record.Metadata.UnMarshal(b)
+	if err != nil {
+		return nil, err
+	}
+	b = make([]byte, record.ContentSize())
+	file.ReadAt(b, *offset)
+	*offset += int64(record.ContentSize())
+
+	record.UnMarshalKey(b[:record.Metadata.KeySize])
+	err = record.UnMarshalVal(b[record.Metadata.KeySize:])
+	if err != nil {
+		return nil, err
+	}
+	return &record, nil
+}
+
 func (t *TableCluster) compactingLvl0() {
 	if len(t.ftables[0]) <= t.cfg.Lvl0MaxTableNum {
 		return
@@ -141,8 +165,6 @@ func (t *TableCluster) compactingLvl0() {
 
 	fmt.Printf("[INFO] Start compaction job for %d ftables at %d\n", lastIndex, time.Now().UnixMilli())
 
-	minHeap := &MinHeapRecord{}
-	heap.Init(minHeap)
 	totalRecords := 0
 
 	for i := range lastIndex {
@@ -162,17 +184,12 @@ func (t *TableCluster) compactingLvl0() {
 			if curRecords[i] != nil {
 				continue
 			}
-			tmpRecord := Record{}
-			b := make([]byte, SizeOfMetadata)
-			t.ftables[0][i].dataFile.ReadAt(b, offsets[i])
-			offsets[i] += SizeOfMetadata
-			tmpRecord.Metadata.UnMarshal(b)
-			b = make([]byte, tmpRecord.ContentSize())
-			t.ftables[0][i].dataFile.ReadAt(b, offsets[i])
-			offsets[i] += int64(tmpRecord.ContentSize())
-			tmpRecord.UnMarshalKey(b[:tmpRecord.Metadata.KeySize])
-			tmpRecord.UnMarshalVal(b[tmpRecord.Metadata.KeySize:])
-			curRecords[i] = &tmpRecord
+			tmpRecord, err := readRecordFromFTable(t.ftables[0][i].dataFile, &offsets[i])
+			if err != nil {
+				fmt.Printf("[ERROR] Error reading record from file: %v\n", err)
+				continue
+			}
+			curRecords[i] = tmpRecord
 		}
 
 		for i := max(lastIndex-1, 0); i >= 0; i-- {
@@ -216,17 +233,12 @@ func (t *TableCluster) compactingLvl0() {
 			for lvl1Idx < maxI && lvl0Idx < len(lvl0records) {
 				if lvl1Record == nil {
 					if offset <= t.ftables[1][lvl1Idx].sizeInBytes {
-						lvl1Record = &Record{}
-						b := make([]byte, SizeOfMetadata)
-						t.ftables[1][lvl1Idx].dataFile.ReadAt(b, offset)
-						offset += SizeOfMetadata
-						lvl1Record.Metadata.UnMarshal(b)
-
-						b = make([]byte, lvl1Record.ContentSize())
-						t.ftables[1][lvl1Idx].dataFile.ReadAt(b, offset)
-						offset += int64(lvl1Record.ContentSize())
-						lvl1Record.UnMarshalKey(b[:lvl1Record.Metadata.KeySize])
-						lvl1Record.UnMarshalVal(b[lvl1Record.Metadata.KeySize:])
+						tmp, err := readRecordFromFTable(t.ftables[1][lvl1Idx].dataFile, &offset)
+						if err != nil {
+							fmt.Printf("[ERROR] Error reading record from file: %v\n", err)
+							continue
+						}
+						lvl1Record = tmp
 					} else if lvl1Idx+1 < maxI {
 						lvl1Idx++
 						offset = 0
@@ -257,16 +269,12 @@ func (t *TableCluster) compactingLvl0() {
 			for lvl1Idx < maxI {
 				if offset <= t.ftables[1][lvl1Idx].sizeInBytes {
 					lvl1Record = &Record{}
-					b := make([]byte, SizeOfMetadata)
-					t.ftables[1][lvl1Idx].dataFile.ReadAt(b, offset)
-					offset += SizeOfMetadata
-					lvl1Record.Metadata.UnMarshal(b)
-
-					b = make([]byte, lvl1Record.ContentSize())
-					t.ftables[1][lvl1Idx].dataFile.ReadAt(b, offset)
-					offset += int64(lvl1Record.ContentSize())
-					lvl1Record.UnMarshalKey(b[:lvl1Record.Metadata.KeySize])
-					lvl1Record.UnMarshalVal(b[lvl1Record.Metadata.KeySize:])
+					tmp, err := readRecordFromFTable(t.ftables[1][lvl1Idx].dataFile, &offset)
+					if err != nil {
+						fmt.Printf("[ERROR] Error reading record from file: %v\n", err)
+						continue
+					}
+					lvl1Record = tmp
 					minRecordCh <- lvl1Record
 				} else if lvl1Idx+1 < maxI {
 					lvl1Idx++
