@@ -2,6 +2,7 @@ package keynest
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"sort"
 	"sync"
@@ -26,6 +27,7 @@ func NewTableCluster(cfg *Config) *TableCluster {
 	}
 	tc.ftables[0] = make([]*FTable, 0)
 	tc.ftablesLock = []sync.RWMutex{{}}
+	tc.runMemTableFlushJob()
 	tc.runFTableCompactionJob()
 	return tc
 }
@@ -113,7 +115,9 @@ func (t *TableCluster) runFTableCompactionJob() {
 func (t *TableCluster) runMemTableFlushJob() {
 	go func() {
 		for range time.Tick(t.cfg.MemFlushInterval) {
-			t.flushMemTableToFTable()
+			if t.memtable.tree.Size() > t.cfg.MemMaxNum {
+				t.flushMemTableToFTable()
+			}
 		}
 	}()
 }
@@ -121,14 +125,13 @@ func (t *TableCluster) runMemTableFlushJob() {
 func (t *TableCluster) flushMemTableToFTable() {
 	t.memTableLock.Lock()
 	defer t.memTableLock.Unlock()
+	defer t.SnapshotTableClusterMetadata()
 
 	values := t.memtable.tree.Values()
 	if len(values) == 0 {
 		return
 	}
 	keys := t.memtable.tree.Keys()
-	t.memtable.tree.Clear()
-
 	sortedRecords := make([]*Record, len(values))
 	for i, v := range values {
 		memRecord := v.(*MemRecord)
@@ -142,6 +145,7 @@ func (t *TableCluster) flushMemTableToFTable() {
 	}
 
 	t.AddRecords(sortedRecords)
+	t.memtable.tree.Clear()
 }
 
 func readRecordFromFTable(file *os.File, offset *int64) (*Record, error) {
@@ -178,7 +182,7 @@ func (t *TableCluster) compactingLvl0() {
 	//so we need to lock the last index of which the compaction will start from index 0 till the last index
 	lastIndex := len(t.ftables[0])
 
-	fmt.Printf("[INFO] Start compaction job for %d ftables at %d\n", lastIndex, time.Now().UnixMilli())
+	log.Printf("[INFO] Start compaction job for %d ftables at %d\n", lastIndex, time.Now().UnixMilli())
 
 	totalRecords := 0
 
@@ -201,24 +205,26 @@ func (t *TableCluster) compactingLvl0() {
 			}
 			tmpRecord, err := readRecordFromFTable(t.ftables[0][i].dataFile, &offsets[i])
 			if err != nil {
-				fmt.Printf("[ERROR] Error reading record from file: %v\n", err)
+				log.Printf("[ERROR] Error reading record from file: %v\n", err)
 				continue
 			}
 			curRecords[i] = tmpRecord
 		}
 
+		var minRecordPointerOfPointer **Record
 		for i := max(lastIndex-1, 0); i >= 0; i-- {
 			if curRecords[i] == nil {
 				continue
 			}
 			if minRecord == nil {
 				minRecord = curRecords[i]
-				curRecords[i] = nil
+				minRecordPointerOfPointer = &curRecords[i]
 				continue
 			}
 
 			if minRecord.Key > curRecords[i].Key {
 				minRecord = curRecords[i]
+				minRecordPointerOfPointer = &curRecords[i]
 			} else if minRecord.Key == curRecords[i].Key { //if duplicate found
 				curRecords[i] = nil //remove duplicate
 			}
@@ -227,6 +233,8 @@ func (t *TableCluster) compactingLvl0() {
 			break
 		}
 		lvl0records = append(lvl0records, minRecord)
+		minRecord = nil
+		*minRecordPointerOfPointer = nil
 	}
 
 	var ftable *FTable
@@ -281,8 +289,8 @@ func (t *TableCluster) compactingLvl0() {
 			}
 
 			//accumulate the rest of the records
-			for lvl1Idx < maxI {
-				if offset <= t.ftables[1][lvl1Idx].sizeInBytes {
+			for lvl1Idx < maxI { //139266
+				if offset < t.ftables[1][lvl1Idx].sizeInBytes {
 					lvl1Record = &Record{}
 					tmp, err := readRecordFromFTable(t.ftables[1][lvl1Idx].dataFile, &offset)
 					if err != nil {
@@ -322,7 +330,7 @@ func (t *TableCluster) compactingLvl0() {
 
 	if isOverlap {
 		for i := minI; i < maxI; i++ {
-			fmt.Printf("[INFO] Destroy table[%d][%d]\n", 1, i)
+			log.Printf("[INFO] Destroy table[%d][%d]\n", 1, i)
 			t.ftables[1][i].Destroy()
 		}
 		t.ftables[1] = append(t.ftables[1][:minI], append([]*FTable{ftable}, t.ftables[1][maxI:]...)...)
@@ -332,13 +340,13 @@ func (t *TableCluster) compactingLvl0() {
 	fmt.Println("[INFO] New table added at lvl 1")
 
 	for i := 0; i < lastIndex; i++ {
-		fmt.Printf("[INFO] Destroy table[%d][%d]\n", 0, i)
+		log.Printf("[INFO] Destroy table[%d][%d]\n", 0, i)
 		t.ftables[0][i].Destroy()
 	}
 	t.ftables[0] = t.ftables[0][lastIndex:]
 	t.ftablesLock[1].Unlock()
 	t.ftablesLock[0].Unlock()
-	fmt.Printf("[INFO] Compaction job done at %d for %d ftables\n", time.Now().UnixMilli(), lastIndex)
+	log.Printf("[INFO] Compaction job done at %d for %d ftables\n", time.Now().UnixMilli(), lastIndex)
 }
 
 // find overlap tables given a min-max keys. the interpretation of minI-maxI is similar to golang slice [minI-maxI] which means all elements
