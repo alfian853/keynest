@@ -6,6 +6,7 @@ import (
 	"io"
 	"keynest"
 	testcase_gen "keynest/testcase-gen"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -24,10 +25,13 @@ func main() {
 		WriteBufferSize:    1024 * 4,
 		FalsePositiveRate:  0.01,
 		Lvl0MaxTableNum:    4,
+		MemMaxNum:          1000,
 		CompactionInterval: time.Second * 4,
+		MemFlushInterval:   time.Second * 2,
 	})
+	mux := http.NewServeMux()
 
-	http.Handle("/add-records", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	mux.Handle("/add-records", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		prefix := r.URL.Query().Get("prefix")
 		suffix := r.URL.Query().Get("suffix")
 
@@ -54,25 +58,16 @@ func main() {
 		cluster.AddRecords(records)
 	}))
 
-	http.Handle("/record", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		resp := &Response{}
+	mux.Handle("/record", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer func() {
 			if r := recover(); r != nil {
-				resp := &Response{
-					StatusCode: http.StatusInternalServerError,
-					Message:    "internal server error",
-				}
-				w.Header().Set("Content-Type", "application/json")
-				json.NewEncoder(w).Encode(resp)
+				w.WriteHeader(http.StatusInternalServerError)
+				return
 			}
-			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(resp)
-
 		}()
 		key := r.URL.Query().Get("key")
 		if key == "" {
-			resp.Message = "key is required"
-			resp.StatusCode = http.StatusBadRequest
+			w.WriteHeader(http.StatusBadRequest)
 			return
 		}
 
@@ -84,15 +79,15 @@ func main() {
 			switch contentType {
 			case "application/json":
 				if err := json.NewDecoder(r.Body).Decode(&data); err != nil {
-					resp.StatusCode = http.StatusBadRequest
-					resp.Message = "invalid request body"
+					w.WriteHeader(http.StatusBadRequest)
+					w.Header().Set("reason", "invalid request body")
 					return
 				}
 			case "plain-text/string":
 				body, err := io.ReadAll(r.Body)
 				if err != nil {
-					resp.StatusCode = http.StatusBadRequest
-					resp.Message = "invalid request body"
+					w.WriteHeader(http.StatusBadRequest)
+					w.Header().Set("reason", "invalid request body")
 					return
 				}
 				data = string(body)
@@ -100,8 +95,8 @@ func main() {
 				body, err := io.ReadAll(r.Body)
 				numStr := string(body)
 				if err != nil {
-					resp.StatusCode = http.StatusBadRequest
-					resp.Message = "invalid request body"
+					w.WriteHeader(http.StatusBadRequest)
+					w.Header().Set("reason", "invalid request body")
 					return
 				}
 				if contentType == "plain-text/int32" {
@@ -110,30 +105,42 @@ func main() {
 					data, err = strconv.ParseInt(numStr, 10, 64)
 				}
 				if err != nil {
-					resp.StatusCode = http.StatusInternalServerError
-					resp.Message = "failed to parse"
+					w.WriteHeader(http.StatusBadRequest)
+					w.Header().Set("reason", "failed to parse")
 					return
 				}
 			}
 
 			cluster.Put(key, data)
-			resp.StatusCode = http.StatusOK
+			w.WriteHeader(http.StatusOK)
 		case http.MethodDelete:
 			cluster.Delete(key)
-			resp.StatusCode = http.StatusOK
+			w.WriteHeader(http.StatusOK)
 		case http.MethodGet:
 			val, ok := cluster.Get(key)
 			if !ok {
-				resp.StatusCode = http.StatusNotFound
-				resp.Message = "key not found"
+				w.WriteHeader(http.StatusNotFound)
 				return
 			}
-			resp.StatusCode = http.StatusOK
-			resp.Val = val
+			w.WriteHeader(http.StatusOK)
+			switch val.(type) {
+			case int64:
+				w.Header().Set("Content-Type", "plain-text/int64")
+				w.Write([]byte(strconv.FormatInt(val.(int64), 10)))
+			case int32:
+				w.Header().Set("Content-Type", "plain-text/int32")
+				w.Write([]byte(strconv.FormatInt(int64(val.(int32)), 10)))
+			case string:
+				w.Header().Set("Content-Type", "plain-text/string")
+				w.Write([]byte(val.(string)))
+			case any:
+				w.Header().Set("Content-Type", "application/json")
+				json.NewEncoder(w).Encode(val)
+			}
 		}
 	}))
 
-	http.Handle("/trigger-compact", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	mux.Handle("/trigger-compact", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		resp := &Response{
 			StatusCode: http.StatusOK,
 		}
@@ -153,7 +160,7 @@ func main() {
 		cluster.TriggerCompaction()
 	}))
 
-	http.Handle("/trigger-memflush", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	mux.Handle("/trigger-memflush", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		resp := &Response{
 			StatusCode: http.StatusOK,
 		}
@@ -173,7 +180,7 @@ func main() {
 		cluster.TriggerMemFlush()
 	}))
 
-	http.Handle("/trigger-snapshot", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	mux.Handle("/trigger-snapshot", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		resp := &Response{
 			StatusCode: http.StatusOK,
 		}
@@ -193,7 +200,7 @@ func main() {
 		cluster.SnapshotTableClusterMetadata()
 	}))
 
-	http.Handle("/trigger-load-metadata", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	mux.Handle("/trigger-load-metadata", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 
 		resp := &Response{
 			StatusCode: http.StatusOK,
@@ -214,5 +221,23 @@ func main() {
 		cluster.LoadTableClusterMetadata()
 	}))
 
-	http.ListenAndServe(":8080", nil)
+	server := &http.Server{
+		Addr:         ":8080",
+		Handler:      mux,
+		ReadTimeout:  1 * time.Second,
+		WriteTimeout: 1 * time.Second,
+		IdleTimeout:  10 * time.Second,
+	}
+
+	// Handle panics
+	defer func() {
+		if err := recover(); err != nil {
+			log.Printf("Recovered from panic: %v", err)
+		}
+	}()
+
+	log.Println("Starting server on :8080")
+	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		log.Fatalf("Could not listen on :8080: %v", err)
+	}
 }

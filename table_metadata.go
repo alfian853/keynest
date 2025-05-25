@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"github.com/vmihailenco/msgpack/v5"
 	"keynest/bloom"
+	"log"
 	"os"
 	"sync"
 )
@@ -35,19 +36,19 @@ func (t *TableCluster) SnapshotTableClusterMetadata() {
 
 	bytes, err := msgpack.Marshal(clusterMetadata)
 	if err != nil {
-		fmt.Printf("[ERROR] Error marshalling cluster metadata: %v\n", err)
+		log.Printf("[ERROR] Error marshalling cluster metadata: %v\n", err)
 		return
 	}
 
 	file, err := os.Create(fmt.Sprintf("master-metadata"))
 	if err != nil {
-		fmt.Printf("[ERROR] Error creating file: %v\n", err)
+		log.Printf("[ERROR] Error creating file: %v\n", err)
 		return
 	}
 	defer file.Close()
 	_, err = file.Write(bytes)
 	if err != nil {
-		fmt.Printf("[ERROR] Error writing to file: %v\n", err)
+		log.Printf("[ERROR] Error writing to file: %v\n", err)
 	}
 }
 
@@ -55,7 +56,7 @@ func (t *TableCluster) LoadTableClusterMetadata() {
 	file, err := os.OpenFile("master-metadata", os.O_RDONLY, 0644)
 	defer file.Close()
 	if err != nil {
-		fmt.Printf("[ERROR] Error opening file: %v\n", err)
+		log.Printf("[ERROR] Error opening file: %v\n", err)
 		return
 	}
 	defer file.Close()
@@ -64,7 +65,7 @@ func (t *TableCluster) LoadTableClusterMetadata() {
 	decoder := msgpack.NewDecoder(file)
 	err = decoder.Decode(&clusterMetadata)
 	if err != nil {
-		fmt.Printf("[ERROR] Error decoding file: %v\n", err)
+		log.Printf("[ERROR] Error decoding file: %v\n", err)
 		return
 	}
 
@@ -75,6 +76,7 @@ func (t *TableCluster) LoadTableClusterMetadata() {
 		t.ftablesLock[i] = sync.RWMutex{}
 		for j, _ := range clusterMetadata.FTableMetadata[i] {
 			dataFile, _ := os.Open(clusterMetadata.FTableMetadata[i][j].FileName)
+			log.Printf("[INFO] Loading table metadata: %v\n", dataFile.Name())
 			t.ftables[i][j] = &FTable{
 				cfg:         t.cfg,
 				nRecords:    clusterMetadata.FTableMetadata[i][j].NRecords,
